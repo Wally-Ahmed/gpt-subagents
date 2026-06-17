@@ -1,7 +1,7 @@
 {
   "name": "gpt-subagents-api",
   "version": "1.0.0",
-  "description": "MCP server that lets Claude Code delegate to caller-selected OpenAI models as expert subagents (ask_gpt_worker for coding, ask_gpt_architect for reasoning/review), with a library of orchestration patterns. Uses your OpenAI API key.",
+  "description": "MCP server that lets Claude Code delegate to a caller-selected OpenAI model as an expert subagent (a single ask_gpt tool), with a library of orchestration patterns. Uses your OpenAI API key.",
   "main": "dist/server.js",
   "scripts": {
     "build": "tsc",

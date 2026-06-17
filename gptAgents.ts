@@ -13,16 +13,12 @@ function getClient(): OpenAI {
   return openai;
 }
 
-type WorkerInput = {
-  task: string;
-  context?: string;
+type AskGptInput = {
   model: string;
-};
-
-type ArchitectInput = {
-  question: string;
+  instructions: string;
+  prompt: string;
   context?: string;
-  model: string;
+  reasoningEffort?: "low" | "medium" | "high";
 };
 
 // Best-effort secret redaction for anything we send to the external API. Every
@@ -84,90 +80,33 @@ async function callOpenAI(
   }
 }
 
-export async function askGptWorker({
-  task,
-  context = "",
+// A single entry point. There is no separate "worker" vs "architect" function:
+// the caller picks the model, writes the instructions (system prompt), and
+// optionally sets the reasoning effort. Which role it plays — fast concrete
+// worker vs deep reasoning expert — is a matter of those choices plus the
+// orchestration pattern applied around it, not a different code path.
+export async function askGpt({
   model,
-}: WorkerInput): Promise<string> {
-  const client = getClient();
-  const safeTask = sanitizeContext(task);
-  const safeContext = sanitizeContext(context);
-
-  return callOpenAI("ask_gpt_worker", () =>
-    client.responses.create({
-    model,
-    instructions: `
-You are a coding subagent. You handle routine implementation work.
-
-Focus on:
-- Correct, working code patches
-- Debugging with stack traces and error context
-- Test writing and test-driven fixes
-- Repo inspection and code navigation
-- Implementation details and concrete edits
-
-Return:
-- The fix or implementation
-- Code patch (diff or full replacement)
-- Any edge cases or risks noticed
-- Confidence level (high/medium/low)
-
-Be direct. Produce code, not essays.
-    `.trim(),
-    input: `
-Task:
-${safeTask}
-
-Context:
-${safeContext}
-    `.trim(),
-    })
-  );
-}
-
-export async function askGptArchitect({
-  question,
+  instructions,
+  prompt,
   context = "",
-  model,
-}: ArchitectInput): Promise<string> {
+  reasoningEffort,
+}: AskGptInput): Promise<string> {
   const client = getClient();
-  const safeQuestion = sanitizeContext(question);
+  // Everything outbound is run through the secret redactor.
+  const safeInstructions = sanitizeContext(instructions);
+  const safePrompt = sanitizeContext(prompt);
   const safeContext = sanitizeContext(context);
+  const input = safeContext
+    ? `${safePrompt}\n\nContext:\n${safeContext}`
+    : safePrompt;
 
-  return callOpenAI("ask_gpt_architect", () =>
+  return callOpenAI("ask_gpt", () =>
     client.responses.create({
-    model,
-    reasoning: { effort: "xhigh" },
-    instructions: `
-You are a senior architect subagent for hard reasoning tasks.
-
-Focus on:
-- Architecture decisions and tradeoffs
-- Complex debugging strategy
-- Security and threat modeling
-- Risk assessment for large or high-stakes changes
-- Design review and system-level reasoning
-
-Important:
-- Clearly separate facts from assumptions.
-- Flag uncertainty. Do not make confident claims you cannot support.
-- When referencing files, APIs, dependencies, or behaviors, note whether you are certain or inferring.
-- Prefer structured reasoning: state the problem, enumerate options, recommend with rationale.
-
-Return:
-- Analysis of the problem
-- Options considered with tradeoffs
-- Recommended approach with rationale
-- Risks and unknowns
-- Confidence level (high/medium/low)
-    `.trim(),
-    input: `
-Question:
-${safeQuestion}
-
-Context:
-${safeContext}
-    `.trim(),
+      model,
+      instructions: safeInstructions,
+      ...(reasoningEffort ? { reasoning: { effort: reasoningEffort } } : {}),
+      input,
     })
   );
 }

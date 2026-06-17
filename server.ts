@@ -4,7 +4,7 @@ import { fileURLToPath } from "url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { askGptWorker, askGptArchitect } from "./gptAgents.js";
+import { askGpt } from "./gptAgents.js";
 import { listPatterns, getPattern, patternNames } from "./patterns.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -19,31 +19,33 @@ const server = new McpServer(
   },
   {
     instructions: `
-This server lets you delegate to OpenAI "expert" models from inside your agent loop:
+This server lets you delegate to an OpenAI "expert" model from inside your agent loop, via a SINGLE tool:
 
-- ask_gpt_worker: routine coding — patches, debugging, tests, repo inspection. Cheaper and
-  faster; prefer it for concrete code work. You choose the model (e.g. gpt-5.3-codex).
-- ask_gpt_architect: hard reasoning, architecture decisions, security/threat modeling, and
-  review of large or high-risk changes. Uses high-effort reasoning; you choose the model
-  (e.g. gpt-5.5).
+- ask_gpt: ask any OpenAI model. You choose the model, write the instructions (its system prompt), and
+  optionally set reasoning_effort. There is NO separate "worker" vs "architect" tool — that distinction
+  is just the orchestration PATTERN you apply plus your model/effort choice:
+  - Concrete code work (patches, debugging, tests, repo inspection): a fast model (e.g. gpt-5.3-codex)
+    + the worker-orchestrator pattern.
+  - Hard reasoning, architecture, security/threat modeling, review of large/high-risk changes: a strong
+    model (e.g. gpt-5.5) + reasoning_effort "high" + the two-layer-cross-model-expert pattern.
 
-ORCHESTRATION PATTERNS: Before any non-trivial use of ask_gpt_architect — or for any
-review, audit, threat modeling, or large-document analysis whose output you would act on —
-call list_patterns and apply the most relevant pattern, then read it in full with get_pattern.
-Patterns are reusable playbooks that keep expert output parallel, context-cheap, and verified
-against ground truth. For quick one-off lookups you may call the expert tools directly.
+ORCHESTRATION PATTERNS: Before any non-trivial use of ask_gpt — reviews, audits, threat modeling,
+large-document analysis, anything whose output you would act on — call list_patterns and apply the most
+relevant pattern, then read it in full with get_pattern. Patterns are reusable playbooks that keep
+expert output parallel, context-cheap, and verified against ground truth.
 
-DATA BOUNDARY: task, question, and context are sent to an external OpenAI API. Secrets are
-stripped on a best-effort basis (common API keys, tokens, and private keys are redacted), but
-this is not guaranteed — do NOT paste highly sensitive data and rely on redaction to protect it.
+DATA BOUNDARY: instructions, prompt, and context are sent to an external OpenAI API. Secrets are
+stripped on a best-effort basis (common API keys, tokens, and private keys are redacted), but this is
+not guaranteed — do NOT paste highly sensitive data and rely on redaction to protect it.
     `.trim(),
   }
 );
 
 // Input size caps. These bound what we forward to the API so an oversized
 // argument can't be used to burn API credit, overflow context, or buffer huge
-// strings. Comparable to the sibling subscription server's limits.
-const MAX_PROMPT_CHARS = 32_000;
+// strings. Matches the sibling subscription server's limits.
+const MAX_INSTRUCTIONS_CHARS = 32_000;
+const MAX_PROMPT_CHARS = 100_000;
 const MAX_CONTEXT_CHARS = 200_000;
 const MAX_PATTERN_NAME_CHARS = 100;
 
@@ -55,81 +57,57 @@ function errorText(err: unknown): string {
 }
 
 server.tool(
-  "ask_gpt_worker",
-  "Delegate a coding task to an OpenAI model. Use for routine coding, debugging, repo inspection, code patches, tests, stack traces, and implementation details — the cheaper, faster path for concrete code work. Pass any valid OpenAI model id; a coding-focused model such as gpt-5.3-codex works well here.",
+  "ask_gpt",
+  "Ask an OpenAI model as an expert subagent. ONE tool for everything: you choose the `model`, write the `instructions` (its system prompt), and optionally set `reasoning_effort`. There is no separate 'worker' vs 'architect' tool — the difference is the orchestration PATTERN you apply plus your model/effort choice: a fast model (e.g. gpt-5.3-codex) with the worker-orchestrator pattern for concrete code work (patches, debugging, tests, repo inspection); a strong model (e.g. gpt-5.5) + reasoning_effort 'high' with the two-layer-cross-model-expert pattern for hard reasoning, architecture, security/threat modeling, and review. Call list_patterns / get_pattern first for non-trivial work.",
   {
-    task: z
-      .string()
-      .trim()
-      .min(1)
-      .max(MAX_PROMPT_CHARS)
-      .describe(
-        "The coding task: describe what to fix, implement, debug, or inspect"
-      ),
-    context: z
-      .string()
-      .max(MAX_CONTEXT_CHARS)
-      .optional()
-      .describe(
-        "Code snippets, error messages, stack traces, or other relevant context"
-      ),
     model: z
       .string()
       .trim()
       .min(1)
       .max(100)
       .describe(
-        "The OpenAI model to use, e.g. 'gpt-5.3-codex'. Any valid OpenAI model id is accepted."
+        "The OpenAI model id (required): e.g. 'gpt-5.3-codex' for fast/coding work, 'gpt-5.5' for deep reasoning. Any valid OpenAI model id is accepted."
       ),
-  },
-  async ({ task, context, model }) => {
-    try {
-      const result = await askGptWorker({ task, context, model });
-      return { content: [{ type: "text" as const, text: result }] };
-    } catch (err) {
-      console.error("[gpt-subagents] ask_gpt_worker handler error:", err);
-      return {
-        isError: true,
-        content: [{ type: "text" as const, text: errorText(err) }],
-      };
-    }
-  }
-);
-
-server.tool(
-  "ask_gpt_architect",
-  "Delegate a hard reasoning task to an OpenAI model with high-effort reasoning. Use for architecture decisions, complex debugging strategy, security/threat modeling, or final review of large/high-risk changes. Pass any valid OpenAI model id; a strong reasoning model such as gpt-5.5 works well here. For reviews and audits, use list_patterns / get_pattern to apply an orchestration pattern that keeps expert output verified against ground truth.",
-  {
-    question: z
+    instructions: z
+      .string()
+      .trim()
+      .min(1)
+      .max(MAX_INSTRUCTIONS_CHARS)
+      .describe(
+        "System instructions for the model (required): its role and how to respond. Write these for the task at hand — e.g. a coding-subagent prompt for worker-style work, or a reviewer/architect prompt for analysis."
+      ),
+    prompt: z
       .string()
       .trim()
       .min(1)
       .max(MAX_PROMPT_CHARS)
+      .describe("The task or question for the model."),
+    reasoning_effort: z
+      .enum(["low", "medium", "high"])
+      .optional()
       .describe(
-        "The architecture, design, or complex reasoning question"
+        "Reasoning effort (higher = deeper but slower). Use 'high' for deep audits / architecture review."
       ),
     context: z
       .string()
       .max(MAX_CONTEXT_CHARS)
       .optional()
       .describe(
-        "Relevant code, constraints, prior analysis, or background information"
-      ),
-    model: z
-      .string()
-      .trim()
-      .min(1)
-      .max(100)
-      .describe(
-        "The OpenAI model to use, e.g. 'gpt-5.5'. Any valid OpenAI model id is accepted."
+        "Code snippets, error messages, stack traces, constraints, or other relevant context."
       ),
   },
-  async ({ question, context, model }) => {
+  async ({ model, instructions, prompt, reasoning_effort, context }) => {
     try {
-      const result = await askGptArchitect({ question, context, model });
+      const result = await askGpt({
+        model,
+        instructions,
+        prompt,
+        reasoningEffort: reasoning_effort,
+        context,
+      });
       return { content: [{ type: "text" as const, text: result }] };
     } catch (err) {
-      console.error("[gpt-subagents] ask_gpt_architect handler error:", err);
+      console.error("[gpt-subagents] ask_gpt handler error:", err);
       return {
         isError: true,
         content: [{ type: "text" as const, text: errorText(err) }],
@@ -140,7 +118,7 @@ server.tool(
 
 server.tool(
   "list_patterns",
-  "List available orchestration patterns for driving the GPT subagents (ask_gpt_worker / ask_gpt_architect). Call this before non-trivial expert work — reviews, audits, threat modeling, large-document analysis — then read the chosen one with get_pattern. Returns each pattern's name, title, summary, and when to use it.",
+  "List available orchestration patterns for driving ask_gpt. Call this before non-trivial expert work — reviews, audits, threat modeling, large-document analysis — then read the chosen one with get_pattern. Returns each pattern's name, title, summary, and when to use it.",
   {},
   async () => {
     const patterns = listPatterns();
@@ -168,7 +146,7 @@ server.tool(
 
 server.tool(
   "get_pattern",
-  "Return the full text of an orchestration pattern by name (see list_patterns). Use it to apply the pattern when orchestrating ask_gpt_worker / ask_gpt_architect calls.",
+  "Return the full text of an orchestration pattern by name (see list_patterns). Use it to apply the pattern when orchestrating ask_gpt calls.",
   {
     name: z
       .string()

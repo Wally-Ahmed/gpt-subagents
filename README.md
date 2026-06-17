@@ -9,19 +9,23 @@ spots). The patterns make that second opinion **parallel, context-cheap, and gro
 
 ---
 
-## The subagent tools
+## The subagent tool
 
-| Tool | Model | Use it for |
-|------|-------|------------|
-| `ask_gpt_worker` | Caller-selected (e.g. gpt-5.3-codex) | Routine coding — patches, debugging, tests, repo inspection, concrete edits. Cheaper and faster. |
-| `ask_gpt_architect` | Caller-selected (e.g. gpt-5.5, high reasoning) | Hard reasoning, architecture decisions, security / threat modeling, review of large or high-risk changes. |
+There's **one** tool — `ask_gpt`. You choose the `model`, write the `instructions` (its system
+prompt), supply a `prompt`, and optionally set `reasoning_effort` and `context`.
 
-Both tools require a `model` parameter — pass any valid OpenAI model id. Suggested defaults are
-shown above, but the server does not hardcode any model.
+There's no separate "worker" and "architect" tool: that distinction is just **which orchestration
+pattern you apply, plus the model and effort you pick** —
 
-Both tools take a task/question plus optional `context`. Inbound context is run through a
-`sanitizeContext` pass that redacts obvious secrets (OpenAI/Anthropic keys) before it leaves your
-machine — but don't rely on it as your only safeguard; avoid pasting secrets.
+| Role | How | Pattern |
+|------|-----|---------|
+| **Worker** — routine coding, patches, debugging, tests, repo inspection | `ask_gpt` with a fast model (e.g. `gpt-5.3-codex`) | [`worker-orchestrator`](./patterns/worker-orchestrator.md) |
+| **Architect** — hard reasoning, architecture, security / threat modeling, review of large/high-risk changes | `ask_gpt` with a strong model (e.g. `gpt-5.5`) + `reasoning_effort: "high"` | [`two-layer-cross-model-expert`](./patterns/two-layer-cross-model-expert.md) |
+
+`model`, `instructions`, and `prompt` are required (any valid OpenAI model id is accepted — the server
+hardcodes none). Inbound `instructions`, `prompt`, and `context` are run through a `sanitizeContext`
+pass that redacts obvious secrets before they leave your machine — a backstop, not a guarantee; avoid
+pasting secrets.
 
 ---
 
@@ -38,17 +42,17 @@ Two tools expose them to the agent:
 
 Patterns are read from disk **at call time**, so adding or editing one needs no rebuild. The
 server's startup `instructions` nudge the agent to consult patterns before any non-trivial
-`ask_gpt_architect` work — or any review, audit, or large-document analysis.
+`ask_gpt` work — or any review, audit, or large-document analysis.
 
 **Shipped patterns**
 
 | name | what it does |
 |------|--------------|
 | [`two-layer-cross-model-expert`](./patterns/two-layer-cross-model-expert.md) | Wrap the GPT expert in verifying Claude subagents so the orchestrator only ever sees parallel, context-cheap, ground-truth-checked conclusions. |
+| [`worker-orchestrator`](./patterns/worker-orchestrator.md) | Fan concrete work out to the GPT worker through cheap Sonnet wrapper subagents — validated by execution, not a verification gate. |
 
-The two-layer pattern also ships a rendered, styled diagram at
-[`patterns/html/two-layer-cross-model-expert.html`](./patterns/html/two-layer-cross-model-expert.html) — open it in a
-browser for the visual walkthrough.
+Both patterns ship a rendered, styled diagram under
+[`patterns/html/`](./patterns/html) — open one in a browser for the visual walkthrough.
 
 See [`patterns/README.md`](./patterns/README.md) to add your own.
 
@@ -92,8 +96,7 @@ Or add it to your MCP client config manually:
 }
 ```
 
-Once connected, the server advertises four tools: `ask_gpt_worker`, `ask_gpt_architect`,
-`list_patterns`, and `get_pattern`.
+Once connected, the server advertises three tools: `ask_gpt`, `list_patterns`, and `get_pattern`.
 
 ---
 
@@ -101,12 +104,13 @@ Once connected, the server advertises four tools: `ask_gpt_worker`, `ask_gpt_arc
 
 ```
 gpt-subagents-api/
-├── server.ts        # MCP server: tool defs + server instructions
-├── gptAgents.ts     # OpenAI calls (worker + architect) and secret sanitization
+├── server.ts        # MCP server: the ask_gpt tool + server instructions
+├── gptAgents.ts     # The OpenAI call (ask_gpt) and secret sanitization
 ├── patterns.ts      # Loads/parses pattern Markdown from patterns/
 ├── patterns/        # Orchestration patterns (one Markdown file each)
 │   ├── README.md
-│   └── two-layer-cross-model-expert.md
+│   ├── two-layer-cross-model-expert.md
+│   └── worker-orchestrator.md
 ├── .env.example     # Placeholder; copy to .env (gitignored)
 └── dist/            # Build output (gitignored)
 ```
@@ -121,7 +125,7 @@ gpt-subagents-api/
 - **`sanitizeContext`** redacts `sk-…` keys and `OPENAI_API_KEY=` / `ANTHROPIC_API_KEY=` assignments
   from outbound context. It's a backstop, not a guarantee — keep secrets out of prompts.
 - **Verify expert output against ground truth.** The `two-layer-cross-model-expert` pattern is the
-  recommended way to drive `ask_gpt_architect` so its output is checked before you act on it.
+  recommended way to drive `ask_gpt` (architect-style) so its output is checked before you act on it.
 
 ---
 
